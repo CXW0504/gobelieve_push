@@ -235,41 +235,6 @@ class IOSPush(object):
                 cls.apns_manager.remove_apns_connection(appid)
 
 
-    @classmethod
-    def receive_p12_update_message(cls):
-        chan_rds = redis.StrictRedis(host=config.CHAN_REDIS_HOST, 
-                                     port=config.CHAN_REDIS_PORT, 
-                                     db=config.CHAN_REDIS_DB,
-                                     password=config.CHAN_REDIS_PASSWORD)
-        sub = chan_rds.pubsub()
-        sub.subscribe("apns_update_p12_channel")
-        for msg in sub.listen():
-            if msg['type'] == 'message':
-                data = msg['data']
-                try:
-                    appid = int(data)
-                except:
-                    logging.warn("invalid app id:%s", data)
-                    continue
-                logging.info("update app:%s p12", appid)
-                cls.apns_manager.remove_apns_connection(appid)
-                cls.apns_manager.remove_pushkit_connection(appid)
-
-    @classmethod
-    def update_p12_thread(cls):
-        while True:
-            try:
-                cls.receive_p12_update_message()
-            except Exception, e:
-                logging.exception(e)
-
-    @classmethod
-    def start(cls):
-        t = threading.Thread(target=cls.update_p12_thread, args=())
-        t.setDaemon(True)
-        t.start()
-
-
 
 def test_alert(sandbox):
     f = open("imdemo_dev.p12", "rb")
