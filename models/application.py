@@ -42,6 +42,9 @@ def get_hw_key(mysql, appid):
 def get_gcm_key(mysql, appid):
     return config.GCM_SENDER_ID, config.GCM_API_KEY
 
+#todo add jg_app_key, jg_app_secret
+def get_jg_key(mysql, appid):
+    return None, None
 
 # 获取微信公众号id
 def get_wx(db, appid):

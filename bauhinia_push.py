@@ -19,7 +19,7 @@ from gcm import GCMPush
 from mipush import MiPush
 from wx_push import WXPush
 from ali_push import AliPush
-
+from jgpush import JGPush
 from models import application
 from models import user
 
@@ -40,6 +40,7 @@ HuaWeiPush.mysql = mysql_db
 GCMPush.mysql = mysql_db
 MiPush.mysql = mysql_db
 AliPush.mysql = mysql_db
+JGPush.mysql = mysql_db
 WXPush.mysql = mysql_db
 WXPush.rds = rds
 
@@ -135,7 +136,7 @@ def push_customer_support_message(appid, appname, u, content, extra):
     #找出最近绑定的token
     ts = max(u.apns_timestamp, u.xg_timestamp, u.ng_timestamp, 
              u.mi_timestamp, u.hw_timestamp, u.gcm_timestamp,
-             u.ali_timestamp)
+             u.ali_timestamp, u.jp_timestamp)
 
     if u.apns_device_token and u.apns_timestamp == ts:
         sound = 'default'
@@ -160,6 +161,8 @@ def push_customer_support_message(appid, appname, u, content, extra):
         #通过透传消息通知app有新消息到达
         content = json.dumps({"xiaowei":{"new":1}})
         AliPush.push_message(appid, appname, u.ali_device_token, content)
+    elif u.jp_device_token and u.jp_timestamp == ts:
+        JGPush.push(appid, appname, u.jp_device_token, content)
     else:
         logging.info("uid:%d has't device token", receiver)
 
@@ -167,8 +170,9 @@ def push_customer_support_message(appid, appname, u, content, extra):
 def push_message_u(appid, appname, u, content, extra):
     receiver = u.uid
     #找出最近绑定的token
-    ts = max(u.apns_timestamp, u.xg_timestamp, u.ng_timestamp, u.mi_timestamp, u.hw_timestamp, u.gcm_timestamp,
-             u.ali_timestamp)
+    ts = max(u.apns_timestamp, u.xg_timestamp, u.ng_timestamp,
+             u.mi_timestamp, u.hw_timestamp, u.gcm_timestamp,
+             u.ali_timestamp, u.jp_timestamp)
 
     if u.apns_device_token and u.apns_timestamp == ts:
         sound = 'default'
@@ -187,6 +191,8 @@ def push_message_u(appid, appname, u, content, extra):
         GCMPush.push(appid, appname, u.gcm_device_token, content)
     elif u.ali_device_token and u.ali_timestamp == ts:
         AliPush.push(appid, appname, u.ali_device_token, content)
+    elif u.jp_device_token and u.jp_timestamp == ts:
+        JGPush.push(appid, appname, u.jp_device_token, content)
     else:
         logging.info("uid:%d has't device token", receiver)
 
@@ -198,6 +204,7 @@ def push_message(appid, appname, receiver, content, extra):
 
     push_message_u(appid, appname, u, content, extra)
 
+    
 def handle_im_message(msg):
     obj = json.loads(msg)
     if not obj.has_key("appid") or \
@@ -217,7 +224,12 @@ def handle_im_message(msg):
 
     extra = {}
     extra["sender"] = sender
-    push_message(appid, appname, receiver, content, extra)
+
+    do_not_disturb = user.get_user_do_not_disturb(rds, appid, receiver, sender)
+    if not do_not_disturb:
+        push_message(appid, appname, receiver, content, extra)
+    else:
+        logging.debug("uid:%s set do not disturb :%s", receiver, sender)
 
 
 def handle_group_message(msg):
@@ -238,20 +250,28 @@ def handle_group_message(msg):
     sender_name = user.get_user_name(rds, appid, sender)
 
     content = push_content(sender_name, obj["content"])
-
+    
+    try:
+        c = json.loads(obj["content"])
+        at = c.get('at', [])
+    except ValueError:
+        at = []
+        
     extra = {}
     extra["sender"] = sender
-
-    if group_id:
-        extra["group_id"] = group_id
+    extra["group_id"] = group_id
 
     for receiver in receivers:
-        if group_id:
-            quiet = user.get_user_notification_setting(rds, appid, receiver, group_id)
-            if quiet:
-                logging.info("uid:%d group id:%d is in quiet mode", receiver, group_id)
-                continue
+        quiet = user.get_user_notification_setting(rds, appid, receiver, group_id)
+        if quiet:
+            logging.info("uid:%d group id:%d do not disturb", receiver, group_id)
 
+        if quiet and receiver not in at:
+            continue
+
+        if receiver in at and sender_name:
+            content = "%s在群聊中@了你"%sender_name
+        
         push_message(appid, appname, receiver, content, extra)
 
 
@@ -320,43 +340,6 @@ def handle_customer_message(msg):
             push_message(appid, appname, receiver, content, extra)
 
 
-def handle_voip_message(msg):
-    obj = json.loads(msg)
-    appid = obj["appid"]
-    sender = obj["sender"]
-    receiver = obj["receiver"]
-
-    appname = get_title(appid)
-    sender_name = user.get_user_name(rds, appid, sender)
-    u = user.get_user(rds, appid, receiver)
-    if u is None:
-        logging.info("uid:%d nonexist", receiver)
-        return
-    #找出最近绑定的token
-    ts = max(u.apns_timestamp, u.xg_timestamp, u.ng_timestamp, u.mi_timestamp, u.hw_timestamp, u.gcm_timestamp,
-             u.ali_timestamp)
-
-    if sender_name:
-        sender_name = sender_name.decode("utf8")
-        content = "%s:%s"%(sender_name, u"请求与你通话")
-    else:
-        content = u"你的朋友请求与你通话"
-
-    if u.apns_device_token and u.apns_timestamp == ts:
-        sound = "apns.caf"
-        badge = 0
-        ios_push(appid, u.apns_device_token, content, badge, sound, {})
-    elif u.mi_device_token and u.mi_timestamp == ts:
-        MiPush.push_message(appid, u.mi_device_token, content)
-    elif u.hw_device_token and u.hw_timestamp == ts:
-        HuaWeiPush.push_message(appid, u.hw_device_token, content)
-    elif u.ali_device_token and u.ali_timestamp == ts:
-        AliPush.push_message(appid, appname, u.hw_device_token, content)
-    else:
-        logging.info("uid:%d has't device token", receiver)
-
-
-
 def handle_system_message(msg):
     obj = json.loads(msg)
     appid = obj["appid"]
@@ -410,7 +393,7 @@ def receive_offline_message():
     while True:
         logging.debug("waiting...")
         item = rds.blpop(("push_queue", "group_push_queue",
-                          "customer_push_queue", "voip_push_queue",
+                          "customer_push_queue", 
                           "system_push_queue"))
         if not item:
             continue
@@ -422,8 +405,6 @@ def receive_offline_message():
             handle_group_message(msg)
         elif q == "customer_push_queue":
             handle_customer_message(msg)
-        elif q == "voip_push_queue":
-            handle_voip_message(msg)
         elif q == "system_push_queue":
             handle_system_message(msg)
         else:
