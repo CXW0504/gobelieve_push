@@ -45,4 +45,5 @@ ALI_ACCESS_SECRET = ""
 ALI_APP_KEY = ""
 
 
-
+JG_APP_KEY = ""
+JG_APP_SECRET = ""
