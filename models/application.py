@@ -5,11 +5,13 @@ import traceback
 import time
 import config
 
-
 startup_ts = int(time.time())
 
 def get_app_name(mysql, appid):
     return config.APP_NAME
+
+def get_bundle_id(mysql, appid):
+    return config.BUNDLE_ID
 
 def get_p12(mysql, sandbox, appid):
     with open(config.P12) as f:

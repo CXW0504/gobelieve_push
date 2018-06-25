@@ -23,6 +23,7 @@ IM_RPC_URL = "http://192.168.33.10:6666"
 
 
 APP_NAME = "光大"
+BUNDLE_ID = "" #ios bundle id
 P12 = "imdemo_dev.p12" #p12文件名
 P12_SECRET = ""
 
