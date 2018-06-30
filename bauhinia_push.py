@@ -9,10 +9,10 @@ import traceback
 import binascii
 import requests
 from urllib import urlencode
-from apns2.client import Notification
 from apns2.payload import Payload
 
 from utils import mysql
+from ios_push import Notification
 from ios_push import IOSPush
 from android_push import SmartPush
 from xg_push import XGPush
@@ -109,14 +109,6 @@ def push_content(sender_name, body):
     return alert
 
 
-def ios_push(appid, token, content, badge, sound, extra):
-    IOSPush.push(appid, token, content, sound=sound, badge=badge, extra=extra)
-
-
-def ios_voip_push(appid, token, extra):
-    IOSPush.voip_push(appid, token, extra)
-
-
 def android_push(appid, appname, token, content, extra):
     token = binascii.a2b_hex(token)
     SmartPush.push(appid, appname, token, content, extra)
@@ -124,6 +116,7 @@ def android_push(appid, appname, token, content, extra):
 
 def xg_push(appid, appname, token, content, extra):
     XGPush.push(appid, appname, token, content, extra)
+
 
 #发送系统消息的rpc接口
 def post_system_message(appid, uid, content):
@@ -174,7 +167,8 @@ def push_customer_support_message(appid, appname, u, content, extra):
         logging.info("uid:%d has't device token", receiver)
 
 
-def push_message_u(appid, appname, u, content, extra):
+
+def push_message_u(appid, appname, u, content, extra, collapse_id=None):
     receiver = u.uid
     #找出最近绑定的token
     ts = max(u.apns_timestamp, u.xg_timestamp, u.ng_timestamp,
@@ -183,8 +177,9 @@ def push_message_u(appid, appname, u, content, extra):
 
     if u.apns_device_token and u.apns_timestamp == ts:
         sound = 'default'
-        ios_push(appid, u.apns_device_token, content,
-                 u.unread + 1, sound, extra)
+        IOSPush.push(appid, u.apns_device_token, content,
+                     sound=sound, badge=u.unread+1,
+                     extra=extra, collapse_id=collapse_id)
         user.set_user_unread(rds, appid, receiver, u.unread+1)
     elif u.ng_device_token and u.ng_timestamp == ts:
         android_push(appid, appname, u.ng_device_token, content, extra)
@@ -204,15 +199,120 @@ def push_message_u(appid, appname, u, content, extra):
         logging.info("uid:%d has't device token", receiver)
 
 
-def push_message(appid, appname, receiver, content, extra):
+def push_message(appid, appname, receiver, content, extra, collapse_id=None):
     u = user.get_user(rds, appid, receiver)
     if u is None:
         logging.info("uid:%d nonexist", receiver)
         return
 
-    push_message_u(appid, appname, u, content, extra)
+    push_message_u(appid, appname, u, content, extra, collapse_id=collapse_id)
 
-    
+
+def handle_im_messages(msgs):
+    msg_objs = []
+    for msg in msgs:
+        obj = json.loads(msg)
+        if not obj.has_key("appid") or \
+                not obj.has_key("sender") or \
+                not obj.has_key("receiver"):
+            logging.warning("invalid push msg:%s", msg)
+            continue
+
+        msg_objs.append(obj)
+        logging.debug("push msg:%s", msg)
+
+    apns_users = []
+    jp_users = []
+    xg_users = []
+    hw_users = []
+    gcm_users = []
+    mi_users = []
+    ali_users = []
+
+    for obj in msg_objs:
+        appid = obj["appid"]
+        sender = obj["sender"]
+        receiver = obj["receiver"]
+
+        appname = get_title(appid)
+        sender_name = user.get_user_name(rds, appid, sender)
+
+
+        do_not_disturb = user.get_user_do_not_disturb(rds, appid, receiver, sender)
+        if do_not_disturb:
+            logging.debug("uid:%s set do not disturb :%s", receiver, sender)
+            continue
+
+        u = user.get_user(rds, appid, receiver)
+        if u is None:
+            logging.info("uid:%d nonexist", receiver)
+            continue
+
+        content_obj = json.loads(obj['content'])
+        if content_obj.get('revoke'):
+            collapse_id = content_obj.get('revoke').get('msgid')
+            sender_name = sender_name if sender_name else ''
+            content = "%s撤回了一条消息"%sender_name
+        else:
+            collapse_id = content_obj.get('uuid')
+            content = push_content(sender_name, obj["content"])
+
+        # 找出最近绑定的token
+        ts = max(u.apns_timestamp, u.xg_timestamp, u.mi_timestamp,
+                 u.hw_timestamp, u.gcm_timestamp,
+                 u.ali_timestamp, u.jp_timestamp)
+
+        if u.apns_device_token and u.apns_timestamp == ts:
+            apns_users.append((u, appname, content, collapse_id))
+        elif u.xg_device_token and u.xg_timestamp == ts:
+            xg_users.append((u, appname, content, collapse_id))
+        elif u.mi_device_token and u.mi_timestamp == ts:
+            mi_users.append((u, appname, content, collapse_id))
+        elif u.hw_device_token and u.hw_timestamp == ts:
+            hw_users.append((u, appname, content, collapse_id))
+        elif u.gcm_device_token and u.gcm_timestamp == ts:
+            gcm_users.append((u, appname, content, collapse_id))
+        elif u.ali_device_token and u.ali_timestamp == ts:
+            ali_users.append((u, appname, content, collapse_id))
+        elif u.jp_device_token and u.jp_timestamp == ts:
+            jp_users.append((u, appname, content, collapse_id))
+        else:
+            logging.info("uid:%d has't device token", receiver)
+
+    for u, appname, content, _ in xg_users:
+        xg_push(u.appid, appname, u.xg_device_token, content, {})
+
+    for u, appname, content, _ in hw_users:
+        HuaWeiPush.push(u.appid, appname, u.hw_device_token, content)
+
+    for u, appname, content, _ in gcm_users:
+        GCMPush.push(u.appid, appname, u.gcm_device_token, content)
+
+    for u, appname, content, _ in ali_users:
+        AliPush.push(u.appid, appname, u.ali_device_token, content)
+
+    for u, appname, content, _ in jp_users:
+        JGPush.push(u.appid, appname, u.jp_device_token, content)
+
+    for u, appname, content, _ in mi_users:
+        MiPush.push(u.appid, appname, u.mi_device_token, content)
+
+    # ios apns
+    notifications = []
+    for u, appname, content, collapse_id in apns_users:
+        sound = 'default'
+        payload = Payload(alert=content, sound=sound, badge=u.unread + 1)
+        token = u.apns_device_token
+        n = Notification(token, payload, collapse_id)
+        notifications.append(n)
+
+    if notifications:
+        IOSPush.push_peer_batch(u.appid, notifications)
+
+    for u, appname, content, collapse_id in apns_users:
+        user.set_user_unread(rds, u.appid, u.uid, u.unread + 1)
+
+# 已不再使用
 def handle_im_message(msg):
     obj = json.loads(msg)
     if not obj.has_key("appid") or \
@@ -228,27 +328,26 @@ def handle_im_message(msg):
 
     appname = get_title(appid)
     sender_name = user.get_user_name(rds, appid, sender)
-    content = push_content(sender_name, obj["content"])
-
     extra = {}
     extra["sender"] = sender
 
     do_not_disturb = user.get_user_do_not_disturb(rds, appid, receiver, sender)
-    if not do_not_disturb:
-        push_message(appid, appname, receiver, content, extra)
-    else:
+    if do_not_disturb:
         logging.debug("uid:%s set do not disturb :%s", receiver, sender)
-
-
-def handle_group_message(msg):
-    obj = json.loads(msg)
-    if not obj.has_key("appid") or not obj.has_key("sender") or \
-       not obj.has_key("receivers") or not obj.has_key("group_id"):
-        logging.warning("invalid push msg:%s", msg)
         return
 
-    logging.debug("group push msg:%s", msg)
+    content_obj = json.loads(obj['content'])
+    if content_obj.get('revoke'):
+        collapse_id = content_obj.get('revoke').get('msgid')
+        sender_name = sender_name if sender_name else ''
+        content = "%s撤回了一条消息"%sender_name
+    else:
+        collapse_id = content_obj.get('uuid')
+        content = push_content(sender_name, obj["content"])
+    push_message(appid, appname, receiver, content, extra, collapse_id=collapse_id)
 
+
+def send_group_message(obj):
     appid = obj["appid"]
     sender = obj["sender"]
     receivers = obj["receivers"]
@@ -258,15 +357,21 @@ def handle_group_message(msg):
     sender_name = user.get_user_name(rds, appid, sender)
 
     content = push_content(sender_name, obj["content"])
-    
+
     try:
         c = json.loads(obj["content"])
+        collapse_id = c.get('uuid')
+        if c.has_key('revoke'):
+            collapse_id = c['revoke']['msgid']
+            sender_name = sender_name if sender_name else ''
+            content = "%s撤回了一条消息" % sender_name
         at = c.get('at', [])
         at_all = c.get('at_all', False)
     except ValueError:
         at = []
         at_all = False
-        
+        collapse_id = None
+
     extra = {}
     extra["sender"] = sender
     extra["group_id"] = group_id
@@ -279,7 +384,7 @@ def handle_group_message(msg):
     mi_users = []
     ali_users = []
 
-    #群聊中被at的用户
+    # 群聊中被at的用户
     at_users = []
     for receiver in receivers:
         quiet = user.get_user_notification_setting(rds, appid, receiver, group_id)
@@ -321,7 +426,7 @@ def handle_group_message(msg):
             logging.info("uid:%d has't device token", receiver)
 
     for u in at_users:
-        content = "%s在群聊中@了你"%sender_name
+        content = "%s在群聊中@了你" % sender_name
         push_message_u(appid, appname, u, content, extra)
 
     for u in xg_users:
@@ -333,33 +438,86 @@ def handle_group_message(msg):
     for u in gcm_users:
         GCMPush.push(appid, appname, u.gcm_device_token, content)
 
-    for u in mi_users:
-        MiPush.push(appid, appname, u.mi_device_token, content)
-
     for u in ali_users:
         AliPush.push(appid, appname, u.ali_device_token, content)
 
-    #ios apns
+    # ios apns
     notifications = []
     for u in apns_users:
         sound = 'default'
-        payload = Payload(alert=content, sound=sound, badge=u.unread + 1,  custom=extra)
+        payload = Payload(alert=content, sound=sound, badge=u.unread + 1, custom=extra)
         token = u.apns_device_token
-        n = Notification(token, payload)
+        n = Notification(token, payload, None)
         notifications.append(n)
 
     if notifications:
-        IOSPush.push_batch(appid, notifications)
+        IOSPush.push_group_batch(appid, notifications, collapse_id)
 
     for u in apns_users:
-        user.set_user_unread(rds, appid, receiver, u.unread+1)
+        user.set_user_unread(rds, appid, receiver, u.unread + 1)
 
-    #极光推送
+    # 极光推送
     tokens = []
     for u in jp_users:
         tokens.append(u.jp_device_token)
     if tokens:
         JGPush.push(appid, appname, tokens, content)
+
+    tokens = []
+    for u in mi_users:
+        tokens.append(u.mi_device_token)
+
+    MiPush.push_batch(appid, appname, tokens, content)
+
+
+def handle_group_messages(msgs):
+    msg_objs = []
+    for msg in msgs:
+        obj = json.loads(msg)
+        if not obj.has_key("appid") or not obj.has_key("sender") or \
+                not obj.has_key("receivers") or not obj.has_key("group_id"):
+            logging.warning("invalid push msg:%s", msg)
+            continue
+        msg_objs.append(obj)
+        logging.debug("group push msg:%s", msg)
+
+    # 合并相同的群消息
+    msgs_dict = {}
+    revoke_msgs_dict = {}
+    for obj in msg_objs:
+        c = json.loads(obj['content'])
+
+        if 'revoke' in c:
+            msg_uuid = c.get('revoke').get('msgid')
+            if msg_uuid not in revoke_msgs_dict:
+                revoke_msgs_dict[msg_uuid] = obj
+            else:
+                revoke_msgs_dict[msg_uuid]['receivers'].extend(obj['receivers'])
+        elif 'uuid' in c:
+            msg_uuid = c.get('uuid')
+
+            if msg_uuid not in msgs_dict:
+                msgs_dict[msg_uuid] = obj
+            else:
+                msgs_dict[msg_uuid]['receivers'].extend(obj['receivers'])
+
+    a1 = msgs_dict.values()
+    a2 = revoke_msgs_dict.values()
+    a1.extend(a2)
+
+    for obj in a1:
+        send_group_message(obj)
+
+
+def handle_group_message(msg):
+    obj = json.loads(msg)
+    if not obj.has_key("appid") or not obj.has_key("sender") or \
+       not obj.has_key("receivers") or not obj.has_key("group_id"):
+        logging.warning("invalid push msg:%s", msg)
+        return
+
+    logging.debug("group push msg:%s", msg)
+    send_group_message(obj)
 
 
 def handle_customer_message(msg):
@@ -456,10 +614,10 @@ def handle_system_message(msg):
 
     if u.apns_device_token and u.apns_timestamp == ts:
         if voip_content and u.pushkit_device_token:
-            ios_voip_push(appid, u.pushkit_device_token, voip_content)
+            IOSPush.voip_push(appid, u.pushkit_device_token, voip_content)
         elif content:
-            ios_push(appid, u.apns_device_token, content,
-                     u.unread + 1, sound, {})
+            IOSPush.push(appid, u.apns_device_token, content,
+                         sound=sound, badge=u.unread+1)
             user.set_user_unread(rds, appid, receiver, u.unread+1)
         return
     
@@ -477,25 +635,87 @@ def handle_system_message(msg):
         
 
 def receive_offline_message():
+    """
+    等待100ms，批量发送推送
+    """
     while True:
         logging.debug("waiting...")
-        item = rds.blpop(("push_queue", "group_push_queue",
-                          "customer_push_queue", 
-                          "system_push_queue"))
-        if not item:
-            continue
-        q, msg = item
-        logging.debug("queue:%s message:%s", q, msg)
-        if q == "push_queue":
-            handle_im_message(msg)
-        elif q == "group_push_queue":
-            handle_group_message(msg)
-        elif q == "customer_push_queue":
-            handle_customer_message(msg)
-        elif q == "system_push_queue":
-            handle_system_message(msg)
-        else:
-            logging.warning("unknown queue:%s", q)
+
+        begin = time.time()
+        p_items = []
+        g_items = []
+        c_items = []
+        s_items = []
+        while True:
+            now = time.time()
+            if now - begin > 0.15:
+                break
+            if len(p_items) >= 100:
+                break
+            if len(g_items) >= 500:
+                break
+            if len(c_items) >= 100:
+                break
+            if len(s_items) >= 100:
+                break
+
+            pipe = rds.pipeline()
+            pipe.lpop("push_queue")
+            pipe.lpop("group_push_queue")
+            pipe.lpop("customer_push_queue")
+            pipe.lpop("system_push_queue")
+            p_item, g_item, c_item, s_item = pipe.execute()
+            if p_item:
+                p_items.append(p_item)
+            if g_item:
+                g_items.append(g_item)
+            if c_item:
+                c_items.append(c_item)
+            if s_item:
+                s_items.append(s_item)
+
+            if not p_items and not g_items and not c_items and not s_items:
+                break
+            elif p_item or g_item or c_item or s_item:
+                continue
+
+            # 取到第一条之后，未取到下一条消息，等待一段时间
+            now = time.time()
+            # 100ms
+            if now - begin > 0.1:
+                break
+            timeout = 0.1 - (now - begin)
+            time.sleep(timeout)
+
+        if not p_items and not g_items and not c_items and not s_items:
+            item = rds.blpop(("push_queue",
+                              "group_push_queue",
+                              "customer_push_queue",
+                              "system_push_queue"))
+            if item:
+                q, msg = item
+                if q == "push_queue":
+                    p_items.append(msg)
+                elif q == "group_push_queue":
+                    g_items.append(msg)
+                elif q == "customer_push_queue":
+                    c_items.append(msg)
+                elif q == "system_push_queue":
+                    s_items.append(msg)
+                else:
+                    logging.warning("unknown queue:%s", q)
+
+        if p_items:
+            handle_im_messages(p_items)
+            pass
+        if g_items:
+            handle_group_messages(g_items)
+        if c_items:
+            for msg in c_items:
+                handle_customer_message(msg)
+        if s_items:
+            for msg in s_items:
+                handle_system_message(msg)
 
 
 def main():
@@ -514,7 +734,8 @@ def print_exception_traceback():
     logging.warn("exception traceback:%s", traceback.format_exc())
 
 
-def init_logger(logger):
+def init_logger():
+    logger = logging.getLogger('')
     root = logger
     root.setLevel(logging.DEBUG)
 
@@ -524,7 +745,14 @@ def init_logger(logger):
     ch.setFormatter(formatter)
     root.addHandler(ch)
 
+    logger = logging.getLogger('apns2')
+    logger.setLevel(logging.INFO)
+    logger = logging.getLogger('hyper')
+    logger.setLevel(logging.INFO)
+    logger = logging.getLogger('hpack')
+    logger.setLevel(logging.INFO)
+
 
 if __name__ == "__main__":
-    init_logger(logging.getLogger(''))
+    init_logger()
     main()
