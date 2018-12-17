@@ -576,7 +576,7 @@ def handle_customer_message(msg):
                 extra['store_id'] = store
                 extra['xiaowei'] = {"new":1}
                 store = Store.get_store(rds, store)
-                sender_name = store.name
+                sender_name = store.name if store.name else ""
                 content = push_content(sender_name, raw_content)
                 push_customer_support_message(appid, appname, u, content, extra)
         else:
